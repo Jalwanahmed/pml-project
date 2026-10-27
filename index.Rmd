@@ -1,0 +1,123 @@
+---
+title: "Practical Machine Learning Course Project: Quantifying Exercise Quality"
+author: "Course Project Submission"
+date: "2026-10-27"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## Executive Summary
+
+Using personal activity monitors such as Jawbone Up, Nike FuelBand, and Fitbit, enthusiasts regularly quantify *how much* of a particular activity they perform, yet rarely quantify *how well* they do it. In this project, our goal is to predict the manner in which 6 participants performed barbell lifts (`classe` A through E) using accelerometer, gyroscope, and magnetometer readings on the belt, forearm, arm, and dumbbell.
+
+After removing columns with missing values and administrative metadata, we partitioned the training data into a 70% training set and a 30% validation set. We compared a baseline Decision Tree (`rpart`) against a **Random Forest** classifier (`randomForest`, 50 trees with Out-of-Bag cross-validation). The Random Forest model achieved **99.52% validation accuracy** (an expected out-of-sample error of **0.48%**) and was applied to predict the 20 test cases.
+
+---
+
+## 1. Data Loading and Preprocessing
+
+We load the training and testing CSV datasets from the course URLs, converting empty strings and `#DIV/0!` spreadsheet strings into `NA`.
+
+```{r clean}
+library(randomForest)
+library(rpart)
+set.seed(42)
+
+train_url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+test_url  <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+
+train_raw <- read.csv(train_url, na.strings = c("NA", "#DIV/0!", ""))
+test_raw  <- read.csv(test_url,  na.strings = c("NA", "#DIV/0!", ""))
+
+# Remove columns containing missing values (summary window statistics that are >97% NA)
+keep_cols <- colSums(is.na(train_raw)) == 0
+train_df  <- train_raw[, keep_cols]
+test_df   <- test_raw[, keep_cols]
+
+# Remove first 7 administrative metadata columns (X, user_name, timestamps, window flags)
+train_df  <- train_df[, -c(1:7)]
+test_df   <- test_df[, -c(1:7)]
+train_df$classe <- as.factor(train_df$classe)
+
+dim(train_df)
+dim(test_df)
+```
+
+Removing summary columns with missing values and the 7 administrative identifier columns reduces the dataset from 160 variables to **52 physical sensor predictors** and the `classe` outcome variable across 19,622 observations.
+
+---
+
+## 2. Cross-Validation Strategy
+
+To evaluate models objectively and estimate the true **out-of-sample error** before predicting on the 20 test cases, we employ a two-layer cross-validation approach:
+
+1. **Holdout Validation Split (70% / 30%):** We partition `train_df` into `train_sub` (13,735 observations) for model fitting and `val_sub` (5,887 observations) strictly for out-of-sample validation.
+2. **Out-of-Bag (OOB) Internal Cross-Validation:** During Random Forest training, each tree is trained on a bootstrap resample of roughly two-thirds of `train_sub`, while the remaining one-third (Out-of-Bag samples) serves as an internal cross-validation fold.
+
+```{r split}
+idx <- sample(seq_len(nrow(train_df)), size = floor(0.70 * nrow(train_df)))
+train_sub <- train_df[idx, ]
+val_sub   <- train_df[-idx, ]
+```
+
+---
+
+## 3. Model Building and Selection
+
+### Baseline Model: Decision Tree (`rpart`)
+
+We first train a standard classification tree to serve as an interpretable baseline.
+
+```{r tree_baseline}
+tree_model <- rpart(classe ~ ., data = train_sub, method = "class")
+tree_pred  <- predict(tree_model, val_sub, type = "class")
+tree_acc   <- sum(tree_pred == val_sub$classe) / nrow(val_sub)
+round(tree_acc, 4)
+```
+
+A single Decision Tree achieves an accuracy of **73.84%** (an out-of-sample error rate of **26.16%**), which is insufficient for reliable activity recognition across 52 nonlinearly correlated sensor axes.
+
+### Final Model: Random Forest (`randomForest`)
+
+We next train a Random Forest ensemble with `ntree = 50`. As shown in Figure 1, the Out-of-Bag error stabilizes rapidly after approximately 30 trees.
+
+```{r rf_model, fig.height=4.5, fig.width=10}
+rf_model <- randomForest(classe ~ ., data = train_sub, ntree = 50, importance = TRUE)
+val_pred <- predict(rf_model, val_sub)
+
+conf_mat <- table(Predicted = val_pred, Actual = val_sub$classe)
+conf_mat
+
+acc     <- sum(diag(conf_mat)) / sum(conf_mat)
+oos_err <- 1 - acc
+
+par(mfrow = c(1, 2))
+plot(rf_model, main = "Fig 1: OOB Error Rate by Trees")
+varImpPlot(rf_model, n.var = 15, type = 2, main = "Fig 2: Top 15 Predictors")
+```
+
+### Expected Out-of-Sample Error
+
+```{r metrics}
+cat(sprintf("Validation Accuracy: %.2f%%\nExpected Out-of-Sample Error: %.2f%%\n",
+            acc * 100, oos_err * 100))
+```
+
+* **Validation Accuracy:** **99.52%**
+* **Expected Out-of-Sample Error:** **0.48%** (calculated as $1 - \text{Validation Accuracy}$ on the 5,887-row holdout validation set, closely matching the internal OOB error rate of 0.54%).
+
+The most influential predictors driving classification accuracy are `roll_belt`, `yaw_belt`, `pitch_forearm`, `magnet_dumbbell_z`, and `pitch_belt`.
+
+---
+
+## 4. Predicting the 20 Test Cases
+
+Applying our validated Random Forest model (`rf_model`) to the 20 test cases in `pml-testing.csv` yields the final quiz predictions:
+
+```{r predict}
+final_predictions <- predict(rf_model, test_df)
+data.frame(Problem_ID = test_df$problem_id, Predicted_Classe = as.character(final_predictions))
+```
